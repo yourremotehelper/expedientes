@@ -263,15 +263,21 @@ function cur(){ return S.exps[S.openId]; }
 let saveT = null;
 function touch(x, now){ x.updatedAt = Date.now(); clearTimeout(saveT); if (now) Store.save(x); else saveT = setTimeout(() => Store.save(x), 500); }
 
+function editing(){
+  const a = document.activeElement;
+  return !!a && a !== document.body && $('#app').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+}
 function onData(list){
   const incoming = {}; list.forEach(x => incoming[x.id] = x);
-  const open = S.openId && S.exps[S.openId];
-  const inc = S.openId && incoming[S.openId];
-  if (open && inc && !Store.busy(open.id) && (inc.updatedAt || 0) <= (open.updatedAt || 0)) incoming[S.openId] = open;
+  const open = S.view === 'detail' && S.openId && S.exps[S.openId];
+  const inc = open && incoming[S.openId];
+  // El expediente abierto manda: nunca se sustituye mientras se guarda, mientras escribes
+  // o si lo que llega no es más reciente que lo que tienes en pantalla.
+  if (open && inc && (Store.busy(open.id) || editing() || (inc.updatedAt || 0) <= (open.updatedAt || 0))) incoming[S.openId] = open;
+  if (open && !inc && S.loaded) incoming[S.openId] = open;
   const firstLoad = !S.loaded; S.loaded = true;
-  const reRenderDetail = S.view === 'detail' && inc && open && incoming[S.openId] !== open;
+  const reRenderDetail = open && inc && incoming[S.openId] !== open;
   S.exps = incoming;
-  if (S.view === 'detail' && open && !inc && !firstLoad){ S.exps[open.id] = open; }
   if (S.view === 'board' || firstLoad) render();
   else if (reRenderDetail) renderDetail(true);
 }
