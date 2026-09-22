@@ -1,0 +1,20 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Cambia el correo por el de tu cuenta (el mismo en storage.rules).
+    function esPaula() {
+      return request.auth != null
+        && request.auth.token.email == 'TU_CORREO@ejemplo.com';
+    }
+
+    match /usuarios/{uid}/expedientes/{expId} {
+      allow read, write: if esPaula() && request.auth.uid == uid;
+    }
+
+    // Todo lo demás, cerrado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
