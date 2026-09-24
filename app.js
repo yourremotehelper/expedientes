@@ -90,7 +90,18 @@ const Store = {
         else toast('Se perdió la conexión. Recarga la página.');
       });
   },
-  stop(){ if (this.unsub) this.unsub(); this.unsub = null; this.uid = null; this.col = null; this.token = null; this._root = null; },
+  startCalls(uid, onChange){
+    this.callsCol = collection(fdb, 'usuarios', uid, 'llamadas');
+    this.unsubCalls = onSnapshot(this.callsCol,
+      snap => onChange(snap.docs.map(d => ({ ...d.data(), id: d.id }))),
+      err => { if (err.code === 'permission-denied'){ S.callsError = true; if (S.view === 'agenda') renderAgenda(); } });
+  },
+  async saveCall(c){
+    try{ await setDoc(doc(this.callsCol, c.id), JSON.parse(JSON.stringify(c))); }
+    catch(e){ toast(e.code === 'permission-denied' ? 'No se pudo guardar la llamada: faltan por actualizar las reglas de Firestore.' : 'No se pudo guardar la llamada.'); }
+  },
+  async removeCall(c){ try{ await deleteDoc(doc(this.callsCol, c.id)); }catch(e){ toast('No se pudo borrar la llamada.'); } },
+  stop(){ if (this.unsubCalls) this.unsubCalls(); this.unsubCalls = null; if (this.unsub) this.unsub(); this.unsub = null; this.uid = null; this.col = null; this.token = null; this._root = null; },
   save(x){ this.pending.set(x.id, JSON.parse(JSON.stringify(x))); this._flush(x.id); },
   async _flush(id){
     if (this.inflight.has(id)) return;
@@ -258,7 +269,7 @@ function autoStage(x){
 }
 
 /* ---------- State ---------- */
-const S = { exps: {}, view: 'board', openId: null, q: '', loaded: false };
+const S = { exps: {}, calls: {}, view: 'board', openId: null, q: '', loaded: false, editCall: null, callsError: false };
 function cur(){ return S.exps[S.openId]; }
 let saveT = null;
 function touch(x, now){ x.updatedAt = Date.now(); clearTimeout(saveT); if (now) Store.save(x); else saveT = setTimeout(() => Store.save(x), 500); }
@@ -286,7 +297,7 @@ function onData(list){
 function render(){ if (!Store.uid) return; S.view === 'detail' && cur() ? renderDetail() : renderBoard(); }
 
 function renderBoard(){
-  S.view = 'board'; S.openId = null;
+  S.view = 'board'; S.openId = null; setTab('board');
   const all = Object.values(S.exps).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const q = S.q.trim().toLowerCase();
   const list = q ? all.filter(x => [x.ref, x.op.municipio, x.op.email, x.op.telefono, ...x.titulares.map(t => t.nombre)].join(' ').toLowerCase().includes(q)) : all;
@@ -306,6 +317,7 @@ function renderBoard(){
       <div class="${conPend ? 'warn' : ''}"><strong class="num">${conPend}</strong><span>con documentación pendiente</span></div>
       <div class="${revisar ? 'warn' : ''}"><strong class="num">${revisar}</strong><span>documentos por revisar vigencia</span></div>
       <div class="${parados ? 'bad' : ''}"><strong class="num">${parados}</strong><span>parados más de 7 días</span></div>
+      <div class="${callsPending() ? 'warn' : ''}"><strong class="num">${callsPending()}</strong><span><a href="#" data-act="goAgenda">llamadas pendientes hoy</a></span></div>
     </div>
     <div class="board">${STAGES.map(([s, label]) => {
       const cards = list.filter(x => x.stage === s);
@@ -333,7 +345,7 @@ function cardHtml(x){
 /* ---------- Render: detail ---------- */
 function renderDetail(keepScroll){
   const x = cur(); if (!x) return renderBoard();
-  S.view = 'detail';
+  S.view = 'detail'; setTab('board');
   const y = window.scrollY;
   const o = x.op, hip = o.producto === 'hipoteca';
   const f = (path, label, type = 'text', extra = '') => {
@@ -748,8 +760,8 @@ function openMessage(){
 
 /* ---------- Asistente de nuevo expediente ---------- */
 let W = null;
-function openWizard(){
-  W = { step: 0, producto: '', n: 0, tits: [], arras: null, alquiler: null, tasacion: null, err: '' };
+function openWizard(prefill){
+  W = { step: 0, producto: '', n: 0, tits: [], arras: null, alquiler: null, tasacion: null, err: '', prefill: prefill && prefill.nombre ? prefill : null };
   drawWizard(); $('#dlg').showModal();
 }
 function wSteps(){ return W.producto === 'prestamo' ? ['producto','n','tits','res'] : ['producto','n','tits','op','res']; }
@@ -804,10 +816,148 @@ function wCreate(){
     op: { ...base.op, tipo:'', precio:'', ahorros:'', importe:'', finalidad:'', ccaa:'', municipio:'', tipologia:'', telefono:'', email:'',
           gastosPct: 10, interes: base.op.producto === 'hipoteca' ? 3 : 7, plazo: base.op.producto === 'hipoteca' ? 30 : 8 },
     titulares: base.titulares, files: {}, na: {}, notas: '' };
+  if (W.prefill){
+    x.op.telefono = W.prefill.telefono || '';
+    const c = S.calls[W.prefill.callId];
+    if (c){ c.expId = x.id; c.updatedAt = now; Store.saveCall(c); }
+  }
   S.exps[x.id] = x; Store.save(x);
   $('#dlg').close(); S.openId = x.id; S.view = 'detail'; renderDetail();
   toast(`Expediente ${x.ref} creado.`);
 }
+
+/* ---------- Agenda de llamadas ---------- */
+const pad2 = n => String(n).padStart(2, '0');
+const isoDay = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const todayIso = () => isoDay(new Date());
+const addDays = (iso, n) => { const d = new Date(iso + 'T12:00'); d.setDate(d.getDate() + n); return isoDay(d); };
+const callWhen = c => new Date(`${c.fecha}T${c.hora || '00:00'}`);
+const dayLabel = iso => {
+  const t = todayIso();
+  if (iso === t) return 'Hoy';
+  if (iso === addDays(t, 1)) return 'Mañana';
+  const s = new Date(iso + 'T12:00').toLocaleDateString('es-ES', { weekday:'long', day:'numeric', month:'long' });
+  return s.charAt(0).toUpperCase() + s.slice(1);
+};
+function callsPending(){
+  const t = todayIso();
+  return Object.values(S.calls).filter(c => !c.hecha && c.fecha <= t).length;
+}
+function updateAgendaBadge(){
+  const n = callsPending(); const b = $('#agendaCount');
+  if (b){ b.textContent = n; b.hidden = !n; }
+}
+function setTab(v){
+  $('#tabBoard').setAttribute('aria-current', v === 'agenda' ? 'false' : 'page');
+  $('#tabAgenda').setAttribute('aria-current', v === 'agenda' ? 'page' : 'false');
+  $('#search').placeholder = v === 'agenda' ? 'Buscar llamada por nombre o teléfono' : 'Buscar titular, municipio o referencia';
+}
+function gcalLink(c){
+  const s = callWhen(c), e = new Date(s.getTime() + 15 * 60000);
+  const f = d => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}T${pad2(d.getHours())}${pad2(d.getMinutes())}00`;
+  const q = new URLSearchParams({ action:'TEMPLATE', text:`Llamar a ${c.nombre}`, dates:`${f(s)}/${f(e)}`, ctz:'Europe/Madrid', details:[c.telefono && 'Teléfono: ' + c.telefono, c.nota].filter(Boolean).join('\n') });
+  return 'https://calendar.google.com/calendar/render?' + q.toString();
+}
+function callRow(c){
+  const now = new Date(), t = todayIso();
+  const late = !c.hecha && (c.fecha < t || (c.fecha === t && c.hora && callWhen(c) < now));
+  const tel = (c.telefono || '').replace(/[^\d+]/g, '');
+  const exp = c.expId && S.exps[c.expId];
+  return `<div class="call${late ? ' late' : ''}${c.hecha ? ' done' : ''}">
+    <button class="call-check" data-act="callDone" data-cid="${esc(c.id)}" aria-pressed="${!!c.hecha}" aria-label="${c.hecha ? 'Marcar como pendiente' : 'Marcar como hecha'}">${c.hecha ? '✓' : ''}</button>
+    <div class="call-time num">${esc(c.hora || '--:--')}</div>
+    <div class="call-main">
+      <div><strong>${esc(c.nombre)}</strong>${tel ? ` <a class="num" href="tel:${esc(tel)}">${esc(c.telefono)}</a>` : ''}</div>
+      ${c.nota ? `<div class="hint">${esc(c.nota)}</div>` : ''}
+      ${late && c.fecha < t ? `<div class="hint warn">Atrasada desde ${esc(dayLabel(c.fecha).toLowerCase())}</div>` : ''}
+      ${exp ? `<div class="hint">Expediente <a href="#" data-act="callOpenExp" data-cid="${esc(c.id)}">${esc(exp.ref)}</a></div>` : ''}
+    </div>
+    <div class="acts">
+      ${!c.hecha ? `<a class="btn ghost small" href="${esc(gcalLink(c))}" target="_blank" rel="noopener" title="Añadir a Google Calendar">Calendar</a>` : ''}
+      ${!exp ? `<button class="btn ghost small" data-act="callExp" data-cid="${esc(c.id)}">Crear expediente</button>` : ''}
+      <button class="btn ghost small" data-act="callEdit" data-cid="${esc(c.id)}">Editar</button>
+      <button class="btn ghost small danger" data-act="callDel" data-cid="${esc(c.id)}" aria-label="Eliminar llamada">Borrar</button>
+    </div>
+  </div>`;
+}
+function renderAgenda(){
+  S.view = 'agenda'; S.openId = null; setTab('agenda');
+  const t = todayIso();
+  const edit = S.editCall && S.calls[S.editCall];
+  const f = edit || { nombre:'', telefono:'', fecha: t, hora:'', nota:'' };
+  const q = S.q.trim().toLowerCase();
+  const all = Object.values(S.calls).filter(c => !q || `${c.nombre} ${c.telefono} ${c.nota || ''}`.toLowerCase().includes(q))
+    .sort((a, b) => (a.fecha + (a.hora || '')).localeCompare(b.fecha + (b.hora || '')));
+  const late = all.filter(c => !c.hecha && c.fecha < t);
+  const next = all.filter(c => c.fecha >= t && !c.hecha);
+  const doneToday = all.filter(c => c.hecha && c.fecha === t);
+  const done = all.filter(c => c.hecha && c.fecha !== t).sort((a, b) => (b.hechaAt || 0) - (a.hechaAt || 0)).slice(0, 30);
+  const byDay = {}; next.forEach(c => (byDay[c.fecha] ||= []).push(c));
+  if (!byDay[t] && (doneToday.length || !q)) byDay[t] = [];
+  const days = Object.keys(byDay).sort();
+  const notif = 'Notification' in window && Notification.permission === 'default';
+  $('#app').innerHTML = `
+    ${S.callsError ? `<p class="panel err" style="margin:0 0 16px">No se pueden leer ni guardar las llamadas: faltan por actualizar las reglas de Firestore (el paso que te indiqué con el cambio de la agenda).</p>` : ''}
+    <div class="agenda">
+      <form class="panel call-form" id="callForm" autocomplete="off">
+        <h2>${edit ? 'Editar llamada' : 'Programar llamada'}</h2>
+        <div class="f"><label for="cNombre">Nombre</label><input id="cNombre" required value="${esc(f.nombre)}"></div>
+        <div class="f"><label for="cTel">Teléfono</label><input id="cTel" type="tel" inputmode="tel" value="${esc(f.telefono)}"></div>
+        <div class="row2">
+          <div class="f"><label for="cFecha">Fecha</label><input id="cFecha" type="date" required value="${esc(f.fecha)}"></div>
+          <div class="f"><label for="cHora">Hora</label><input id="cHora" type="time" value="${esc(f.hora)}"></div>
+        </div>
+        <div class="quick">${[['Hoy', 0], ['Mañana', 1], ['En 2 días', 2], ['En una semana', 7]].map(([l, n]) => `<button type="button" class="chip small" data-act="callDay" data-n="${n}">${l}</button>`).join('')}</div>
+        <div class="f"><label for="cNota">Motivo o nota</label><textarea id="cNota" rows="3" placeholder="Qué tengo que hablar, de dónde viene el contacto…">${esc(f.nota || '')}</textarea></div>
+        <p class="err hidden" id="cErr"></p>
+        <div class="stack"><button class="btn primary" type="submit">${edit ? 'Guardar cambios' : 'Añadir a la agenda'}</button>
+          ${edit ? '<button class="btn" type="button" data-act="callCancel">Cancelar</button>' : ''}</div>
+        ${notif ? '<p class="fine">¿Quieres que el navegador te avise a la hora de cada llamada? <button type="button" class="linkish" data-act="callNotif">Activar avisos</button></p>' : ''}
+      </form>
+      <div class="call-list">
+        ${late.length ? `<section class="day late-day"><h3>Atrasadas<span class="num">${late.length}</span></h3>${late.map(callRow).join('')}</section>` : ''}
+        ${days.map(d => { const list = [...byDay[d], ...(d === t ? doneToday : [])];
+          return `<section class="day"><h3>${esc(dayLabel(d))}<span class="num">${byDay[d].length} pendiente${byDay[d].length === 1 ? '' : 's'}</span></h3>${list.map(callRow).join('') || '<p class="hint" style="margin:6px 0 0">No tienes llamadas programadas para hoy.</p>'}</section>`; }).join('')}
+        ${!all.length && q ? '<p class="hint">No hay llamadas que coincidan con la búsqueda.</p>' : ''}
+        ${done.length ? `<details class="day"><summary><h3 style="display:inline">Hechas anteriormente<span class="num"> ${done.length}</span></h3></summary>${done.map(callRow).join('')}</details>` : ''}
+      </div>
+    </div>`;
+  updateAgendaBadge();
+}
+function onCalls(list){
+  S.calls = {}; list.forEach(c => S.calls[c.id] = c); S.callsError = false;
+  updateAgendaBadge();
+  if (S.view === 'agenda' && !editing()) renderAgenda();
+  if (S.view === 'board') renderBoard();
+}
+async function saveCallFromForm(){
+  const nombre = $('#cNombre').value.trim(), fecha = $('#cFecha').value;
+  if (!nombre || !fecha){ const e = $('#cErr'); e.textContent = 'Pon al menos el nombre y la fecha.'; e.classList.remove('hidden'); return; }
+  const now = Date.now(); const prev = S.editCall && S.calls[S.editCall];
+  const c = { ...(prev || { id: 'c' + rid(), createdAt: now, hecha: false }), nombre, telefono: $('#cTel').value.trim(), fecha, hora: $('#cHora').value, nota: $('#cNota').value.trim(), updatedAt: now };
+  if (prev && (prev.fecha !== c.fecha || prev.hora !== c.hora)) delete S.notified[c.id];
+  S.calls[c.id] = c; S.editCall = null; Store.saveCall(c);
+  document.activeElement && document.activeElement.blur();
+  renderAgenda(); toast(prev ? 'Llamada actualizada.' : `Llamada programada para ${dayLabel(c.fecha).toLowerCase()}${c.hora ? ' a las ' + c.hora : ''}.`);
+}
+/* Avisos: mientras tengas la web abierta, te avisa 5 minutos antes */
+S.notified = {};
+function checkCallAlerts(){
+  if (!Store.uid) return;
+  const now = Date.now();
+  Object.values(S.calls).forEach(c => {
+    if (c.hecha || !c.hora || S.notified[c.id]) return;
+    const diff = callWhen(c).getTime() - now;
+    if (diff <= 5 * 60000 && diff > -2 * 60000){
+      S.notified[c.id] = true;
+      const txt = `Llamada a ${c.nombre}${c.telefono ? ' (' + c.telefono + ')' : ''} a las ${c.hora}`;
+      toast(txt);
+      try{ if ('Notification' in window && Notification.permission === 'granted') new Notification('Agenda de llamadas', { body: txt + (c.nota ? '\n' + c.nota : '') }); }catch(e){}
+    }
+  });
+  updateAgendaBadge();
+}
+setInterval(checkCallAlerts, 30000);
 
 /* ---------- Events ---------- */
 document.addEventListener('click', async e => {
@@ -815,7 +965,7 @@ document.addEventListener('click', async e => {
   if (w && W){
     const [g, i] = w.dataset.w.split(':'); const v = w.dataset.v;
     if (g === 'producto') W.producto = v;
-    else if (g === 'n'){ W.n = +v; while (W.tits.length < W.n) W.tits.push({ nombre:'', perfil:'', estadoCivil:'', hijos:'', tieneFin:'' }); W.tits.length = W.n; }
+    else if (g === 'n'){ W.n = +v; while (W.tits.length < W.n) W.tits.push({ nombre:'', perfil:'', estadoCivil:'', hijos:'', tieneFin:'' }); W.tits.length = W.n; if (W.prefill && !W.tits[0].nombre) W.tits[0].nombre = W.prefill.nombre; }
     else if (['arras','alquiler','tasacion'].includes(g)) W[g] = v === '1';
     else { W.tits[+i][g] = v; if (g === 'estadoCivil' && v !== 'divorciado' && v !== 'separado') W.tits[+i].hijos = ''; }
     W.err = ''; const sc = $('.dlg-body') ? $('.dlg-body').scrollTop : 0; drawWizard(); if ($('.dlg-body')) $('.dlg-body').scrollTop = sc; return;
@@ -825,6 +975,15 @@ document.addEventListener('click', async e => {
   if (act === 'open') e.preventDefault();
   switch (act){
     case 'new': openWizard(); break;
+    case 'goAgenda': e.preventDefault(); S.q = ''; $('#search').value = ''; renderAgenda(); window.scrollTo(0, 0); break;
+    case 'callDay': $('#cFecha').value = addDays(todayIso(), +b.dataset.n); break;
+    case 'callCancel': S.editCall = null; renderAgenda(); break;
+    case 'callNotif': try{ await Notification.requestPermission(); }catch(err){} renderAgenda(); break;
+    case 'callDone': { const c = S.calls[b.dataset.cid]; c.hecha = !c.hecha; c.hechaAt = c.hecha ? Date.now() : null; c.updatedAt = Date.now(); Store.saveCall(c); renderAgenda(); break; }
+    case 'callEdit': S.editCall = b.dataset.cid; renderAgenda(); window.scrollTo(0, 0); $('#cNombre').focus(); break;
+    case 'callDel': { const c = S.calls[b.dataset.cid]; if (!confirm(`¿Borrar la llamada a ${c.nombre}?`)) break; delete S.calls[c.id]; if (S.editCall === c.id) S.editCall = null; Store.removeCall(c); renderAgenda(); break; }
+    case 'callExp': { const c = S.calls[b.dataset.cid]; openWizard({ nombre: c.nombre, telefono: c.telefono, callId: c.id }); break; }
+    case 'callOpenExp': { e.preventDefault(); const c = S.calls[b.dataset.cid]; if (S.exps[c.expId]){ S.openId = c.expId; renderDetail(); } break; }
     case 'back': S.view = 'board'; renderBoard(); window.scrollTo(0, 0); break;
     case 'close': $('#dlg').close(); break;
     case 'wNext': W.err = wValidate(); if (!W.err) W.step++; drawWizard(); break;
@@ -875,8 +1034,11 @@ $('#app').addEventListener('click', e => {
   const c = e.target.closest('.card'); if (c){ S.openId = c.dataset.id; renderDetail(); }
 });
 $('#homeBtn').onclick = () => { if (!Store.uid) return; S.view = 'board'; renderBoard(); };
+$('#tabBoard').onclick = () => { if (!Store.uid) return; renderBoard(); window.scrollTo(0, 0); };
+$('#tabAgenda').onclick = () => { if (!Store.uid) return; renderAgenda(); window.scrollTo(0, 0); };
+document.addEventListener('submit', e => { if (e.target.id === 'callForm'){ e.preventDefault(); saveCallFromForm(); } });
 $('#newBtn').onclick = openWizard;
-$('#search').addEventListener('input', e => { if (!Store.uid) return; S.q = e.target.value; if (S.view !== 'board'){ S.view = 'board'; } renderBoard(); });
+$('#search').addEventListener('input', e => { if (!Store.uid) return; S.q = e.target.value; if (S.view === 'agenda') renderAgenda(); else renderBoard(); });
 $('#picker').addEventListener('change', e => { if (e.target.files.length) addFiles(e.target.dataset.key, e.target.files); });
 
 let derT = null;
@@ -950,9 +1112,10 @@ onAuthStateChanged(auth, user => {
     Store.loadToken(user.uid);
     renderBoard();
     Store.start(user.uid, onData);
+    Store.startCalls(user.uid, onCalls);
     updateDriveUi();
   } else {
-    Store.stop(); S.exps = {}; S.loaded = false; S.openId = null;
+    Store.stop(); S.exps = {}; S.calls = {}; S.loaded = false; S.openId = null; updateAgendaBadge();
     document.body.classList.add('auth-out'); $('#userBox').innerHTML = ''; updateDriveUi();
     if (S.view !== 'login') renderLogin();
   }
