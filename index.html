@@ -18,6 +18,10 @@
 <header class="top">
   <div class="top-in">
     <button class="brand" id="homeBtn" type="button"><b>Expedientes</b><small>hipotecas y préstamos</small></button>
+    <nav class="tabs" aria-label="Secciones">
+      <button type="button" id="tabBoard" aria-current="page">Expedientes</button>
+      <button type="button" id="tabAgenda" aria-current="false">Agenda <span class="badge num" id="agendaCount" hidden></span></button>
+    </nav>
     <input class="search" id="search" type="search" placeholder="Buscar titular, municipio o referencia" aria-label="Buscar expedientes">
     <button class="btn small drive-btn" id="driveBtn" type="button" hidden>Conectar Google Drive</button>
     <span class="userbox" id="userBox"></span>
