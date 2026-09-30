@@ -469,6 +469,7 @@ function refreshDerived(){
         ${p.complete ? '' : `<p class="hint" style="margin:0;text-align:center">Faltan ${p.pending.length} documento${p.pending.length === 1 ? '' : 's'}. Aparecerán como pendientes en el resumen.</p>`}
         ${(x.envios || []).length ? (() => { const e = x.envios[x.envios.length - 1]; return `<p class="hint" style="margin:0;text-align:center">Última descarga: ${new Date(e.at).toLocaleString('es-ES', { dateStyle:'short', timeStyle:'short' })}, con ${e.aportados} de ${e.total} documentos.</p>`; })() : ''}
         <button class="btn" data-act="msg" ${p.pending.length ? '' : 'disabled'}>Pedir documentación pendiente</button>
+        ${hip ? `<button class="btn" data-act="tasacion">Pedir tasación</button>${x.tasacion && x.tasacion.pedidaAt ? `<p class="hint" style="margin:0;text-align:center">Solicitud de tasación generada el ${new Date(x.tasacion.pedidaAt).toLocaleDateString('es-ES')}.</p>` : ''}` : ''}
       </div>
     </div>
     <div class="panel">
@@ -959,8 +960,142 @@ function checkCallAlerts(){
 }
 setInterval(checkCallAlerts, 30000);
 
+/* ---------- Solicitud de tasación ---------- */
+const SERVICIOS = [['tasacion','Tasación mercado hipotecario'],['cee','Certificado energético (CEE)'],['ambos','Tasación y CEE']];
+const TAS_DOCS = [['notaSimple','Nota simple'],['escrituras','Escrituras'],['planos','Planos'],['alquiler','Últimos tres recibos y contrato de alquiler']];
+let T = null;
+function tasDefaults(x){
+  const prev = x.tasacion || {};
+  const t0 = x.titulares[0] || {};
+  const hasNota = ((x.files || {})['op:notaSimple'] || []).length > 0;
+  return {
+    servicio: prev.servicio || 'tasacion', idioma: prev.idioma || 'Castellano',
+    titularId: prev.titularId || t0.id || '', nombre: prev.nombre || t0.nombre || '', dni: prev.dni || '', domicilio: prev.domicilio || '',
+    telefono: prev.telefono || x.op.telefono || '', email: prev.email || x.op.email || '',
+    direccion: prev.direccion || '', cp: prev.cp || '', municipio: prev.municipio || x.op.municipio || '', provincia: prev.provincia || '',
+    contacto: prev.contacto || '', contactoTel: prev.contactoTel || '', info: prev.info || '',
+    factMismo: prev.factMismo !== undefined ? prev.factMismo : true, factNombre: prev.factNombre || '', factNif: prev.factNif || '', factDomicilio: prev.factDomicilio || '',
+    docs: prev.docs || { notaSimple: hasNota },
+  };
+}
+function openTasacion(){
+  const x = cur(); if (!x) return;
+  T = { step: 0, err: '', d: tasDefaults(x) };
+  drawTasacion(); $('#dlg').showModal();
+}
+const TSTEPS = ['servicio','titular','inmueble','facturacion','res'];
+function tf(k, label, type = 'text', extra = ''){
+  return `<div class="f"><label for="tz-${k}">${label}</label><input id="tz-${k}" data-tz="${k}" type="${type}" value="${esc(T.d[k])}" autocomplete="off" ${extra}></div>`;
+}
+function tchip(k, v, label, small = ''){ return `<button type="button" class="chip" data-tzc="${k}" data-v="${esc(v)}" aria-pressed="${String(T.d[k]) === String(v)}">${esc(label)}${small ? `<small>${esc(small)}</small>` : ''}</button>`; }
+function drawTasacion(){
+  const x = cur(); const s = TSTEPS[T.step]; const d = T.d; let body = '';
+  if (s === 'servicio') body = `
+    <div class="q"><p>Servicio a contratar</p><div class="chips">${SERVICIOS.map(([v, l]) => tchip('servicio', v, l)).join('')}</div></div>
+    <div class="q" style="margin-bottom:0"><p>Idioma de los informes</p><div class="chips">${['Castellano','Catalán','Gallego','Euskera','Inglés'].map(v => tchip('idioma', v, v)).join('')}</div></div>`;
+  if (s === 'titular') body = `
+    ${x.titulares.length > 1 ? `<div class="q"><p>Titular del informe</p><div class="chips">${x.titulares.map((t, i) => tchip('titularId', t.id, t.nombre || `Titular ${i + 1}`)).join('')}</div></div>` : ''}
+    <div class="fields">${tf('nombre','Nombre y apellidos')}${tf('dni','DNI / NIE')}${tf('telefono','Teléfono','tel')}${tf('email','Correo electrónico','email')}</div>
+    <div class="fields" style="grid-template-columns:1fr;margin-top:12px">${tf('domicilio','Domicilio fiscal del titular')}</div>`;
+  if (s === 'inmueble') body = `
+    <div class="fields" style="grid-template-columns:1fr">${tf('direccion','Dirección del inmueble que se compra','text','placeholder="Calle, número, piso…"')}</div>
+    <div class="fields" style="margin-top:12px">${tf('cp','Código postal','text','inputmode="numeric"')}${tf('municipio','Municipio')}${tf('provincia','Provincia')}</div>
+    <div class="q" style="margin-top:16px"><p>Persona de contacto para la visita</p><div class="fields">${tf('contacto','Nombre (inmobiliaria, vendedor…)')}${tf('contactoTel','Teléfono y/o correo para la visita')}</div></div>
+    <div class="f"><label for="tz-info">Información adicional</label><textarea id="tz-info" data-tz="info" style="min-height:80px">${esc(d.info)}</textarea></div>`;
+  if (s === 'facturacion') body = `
+    <div class="q"><p>Datos de facturación</p><div class="chips">${tchip('factMismo', 'true', 'Los mismos del titular')}${tchip('factMismo', 'false', 'Otros datos')}</div></div>
+    ${!d.factMismo ? `<div class="fields" style="margin-bottom:16px">${tf('factNombre','Nombre o razón social')}${tf('factNif','NIF')}</div><div class="fields" style="grid-template-columns:1fr;margin-bottom:16px">${tf('factDomicilio','Domicilio fiscal')}</div>` : ''}
+    <div class="q" style="margin-bottom:0"><p>Documentación que se adjunta</p>
+      <div class="checks" style="flex-direction:column;gap:10px;border:0;padding:0;margin:0">${TAS_DOCS.map(([k, l]) => `<label><input type="checkbox" data-tzd="${k}" ${d.docs[k] ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+      ${((x.files || {})['op:notaSimple'] || []).length ? '<p class="fine">La nota simple ya está subida en el expediente; puedes descargarla junto con la ficha.</p>' : '<p class="fine">Cohispania necesita al menos la nota simple o las escrituras para valorar la operación.</p>'}</div>`;
+  if (s === 'res'){
+    const docs = TAS_DOCS.filter(([k]) => d.docs[k]).map(([, l]) => l);
+    const hasNota = ((x.files || {})['op:notaSimple'] || []).length > 0;
+    body = `<div class="result">
+      <div class="total"><strong>Ficha lista</strong> para enviar a la tasadora.</div>
+      <h3>Servicio</h3><ul><li>${esc((SERVICIOS.find(z => z[0] === d.servicio) || [,''])[1])}, informes en ${esc(d.idioma.toLowerCase())}</li></ul>
+      <h3>Titular</h3><ul><li>${esc(d.nombre || '—')}${d.dni ? ', ' + esc(d.dni) : ''}</li></ul>
+      <h3>Inmueble</h3><ul><li>${esc([d.direccion, [d.cp, d.municipio].filter(Boolean).join(' '), d.provincia].filter(Boolean).join(', ') || '—')}</li><li>Visita: ${esc([d.contacto, d.contactoTel].filter(Boolean).join(', ') || '—')}</li></ul>
+      <h3>Documentación adjunta</h3><ul>${docs.map(z => `<li>${esc(z)}</li>`).join('') || '<li>Ninguna marcada</li>'}</ul>
+      <div class="stack" style="margin-top:16px">
+        <button class="btn primary" data-act="tasPdf">Descargar ficha (PDF)</button>
+        ${hasNota ? '<button class="btn" data-act="tasZip">Descargar ficha y nota simple (.zip)</button>' : ''}
+      </div>
+</div>`;
+  }
+  const titles = { servicio:'Solicitud de tasación', titular:'Titular del informe', inmueble:'Inmueble y visita', facturacion:'Facturación y documentación', res:'Ficha para la tasadora' };
+  $('#dlgIn').innerHTML = `
+    <div class="dlg-head"><h2>${titles[s]}</h2><p>Paso ${T.step + 1} de ${TSTEPS.length}</p><div class="steps">${TSTEPS.map((_, i) => `<i class="${i <= T.step ? 'on' : ''}"></i>`).join('')}</div></div>
+    <div class="dlg-body">${body}${T.err ? `<p class="err">${esc(T.err)}</p>` : ''}</div>
+    <div class="dlg-foot"><button class="btn" data-act="${T.step ? 'tBack' : 'close'}">${T.step ? 'Atrás' : 'Cancelar'}</button>
+      ${s === 'res' ? '<button class="btn primary" data-act="close">Terminar</button>' : '<button class="btn primary" data-act="tNext">Continuar</button>'}</div>`;
+}
+function tValidate(){
+  const s = TSTEPS[T.step], d = T.d;
+  if (s === 'servicio' && !d.servicio) return 'Elige el servicio a contratar.';
+  if (s === 'titular' && !d.nombre.trim()) return 'Falta el nombre del titular.';
+  if (s === 'inmueble' && !d.direccion.trim()) return 'Falta la dirección del inmueble.';
+  return '';
+}
+function tSave(){ const x = cur(); if (!x) return; x.tasacion = JSON.parse(JSON.stringify(T.d)); touch(x); }
+function tasacionPdf(x, d){
+  const { jsPDF } = window.jspdf; const doc = new jsPDF({ unit:'mm', format:'a4' });
+  const W = 210, M = 18, INK = [21,44,68], BRAND = [31,78,121], STEEL = [221,231,241], MUTED = [81,101,122];
+  const v = s => has(s) ? String(s) : '-';
+  let y = 22;
+  doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text(`Solicitud de ${d.servicio === 'cee' ? 'certificado energético' : d.servicio === 'ambos' ? 'tasación y CEE' : 'tasación'}`, M, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`Fecha de solicitud: ${new Date().toLocaleDateString('es-ES')}`, M, y + 6);
+  y += 16;
+  const section = t => { doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...INK); doc.text(t, M, y); y += 2; doc.setDrawColor(...INK); doc.setLineWidth(.5); doc.line(M, y, W - M, y); y += 4; };
+  const kv = rows => { doc.autoTable({ startY: y, margin:{ left:M, right:M }, theme:'grid', body: rows,
+    styles:{ font:'helvetica', fontSize:10, textColor:INK, lineColor:[200,212,224], lineWidth:.2, cellPadding:2.8, valign:'middle' },
+    columnStyles:{ 0:{ cellWidth:72, fillColor:STEEL, fontStyle:'bold' } } }); y = doc.lastAutoTable.finalY + 10; };
+  const inmueble = [d.direccion, [d.cp, d.municipio].filter(Boolean).join(' '), d.provincia].filter(Boolean).join('\n');
+  section('1. DATOS DEL SERVICIO');
+  kv([
+    ['Servicio a contratar', (SERVICIOS.find(z => z[0] === d.servicio) || [,''])[1].toUpperCase()],
+    ['Nombre y apellidos del titular del informe', v(d.nombre).toUpperCase()],
+    ['DNI titular de la tasación', v(d.dni)],
+    ['Domicilio fiscal del titular de la tasación', v(d.domicilio)],
+    ['Teléfono y correo electrónico del titular de la tasación', [d.telefono, d.email].filter(Boolean).join(', ') || '-'],
+    ['Dirección del inmueble que compra', v(inmueble)],
+    ['Persona de contacto para visita', v(d.contacto)],
+    ['Teléfono y correo electrónico para visita', v(d.contactoTel)],
+    ['Información adicional', v(d.info)],
+    ['Idioma de los informes', v(d.idioma).toUpperCase()]
+  ]);
+  section('2. DATOS FACTURACIÓN');
+  kv(d.factMismo ? [['Nombre o razón social', v(d.nombre).toUpperCase()], ['NIF', v(d.dni)], ['Domicilio fiscal', v(d.domicilio)]]
+                 : [['Nombre o razón social', v(d.factNombre).toUpperCase()], ['NIF', v(d.factNif)], ['Domicilio fiscal', v(d.factDomicilio)]]);
+  section('3. DOCUMENTACIÓN ADJUNTA');
+  kv(TAS_DOCS.map(([k, l]) => [l, d.docs[k] ? 'Se adjunta' : 'No se adjunta']));
+  return doc.output('blob');
+}
+function tasName(x){ return 'Solicitud tasacion - ' + clean(T.d.nombre || titularName(x)); }
+async function tasDownload(zip){
+  const x = cur(); if (!x || !libsOk()) return;
+  tSave(); x.tasacion.pedidaAt = Date.now(); touch(x, true);
+  const pdf = tasacionPdf(x, T.d);
+  if (!zip){ await Store.saveFile(tasName(x) + '.pdf', pdf); toast('Ficha de tasación descargada.'); return; }
+  if (!(await ensureDrive())) return;
+  const z = new JSZip(); const root = z.folder(tasName(x));
+  root.file('Solicitud tasacion.pdf', pdf);
+  const notas = (x.files || {})['op:notaSimple'] || [];
+  for (let i = 0; i < notas.length; i++){ try{ root.file(`Nota simple${notas.length > 1 ? ` (${i + 1})` : ''}.pdf`, await Store.getBlob(notas[i].ref)); }catch(e){} }
+  await Store.saveFile(tasName(x) + '.zip', await z.generateAsync({ type:'blob' })); toast('Ficha y nota simple descargadas.');
+}
 /* ---------- Events ---------- */
 document.addEventListener('click', async e => {
+  const tz = e.target.closest('[data-tzc]');
+  if (tz && T){
+    const k = tz.dataset.tzc; let v = tz.dataset.v;
+    if (k === 'factMismo') v = v === 'true';
+    T.d[k] = v;
+    if (k === 'titularId'){ const t = cur().titulares.find(z => z.id === v); if (t) T.d.nombre = t.nombre || ''; }
+    T.err = ''; const sc = $('.dlg-body').scrollTop; drawTasacion(); $('.dlg-body').scrollTop = sc; return;
+  }
   const w = e.target.closest('[data-w]');
   if (w && W){
     const [g, i] = w.dataset.w.split(':'); const v = w.dataset.v;
@@ -975,6 +1110,11 @@ document.addEventListener('click', async e => {
   if (act === 'open') e.preventDefault();
   switch (act){
     case 'new': openWizard(); break;
+    case 'tasacion': openTasacion(); break;
+    case 'tNext': T.err = tValidate(); if (!T.err){ tSave(); T.step++; } drawTasacion(); $('.dlg-body').scrollTop = 0; break;
+    case 'tBack': T.step--; T.err = ''; drawTasacion(); break;
+    case 'tasPdf': tasDownload(false); break;
+    case 'tasZip': tasDownload(true); break;
     case 'goAgenda': e.preventDefault(); S.q = ''; $('#search').value = ''; renderAgenda(); window.scrollTo(0, 0); break;
     case 'callDay': $('#cFecha').value = addDays(todayIso(), +b.dataset.n); break;
     case 'callCancel': S.editCall = null; renderAgenda(); break;
@@ -1044,6 +1184,8 @@ $('#picker').addEventListener('change', e => { if (e.target.files.length) addFil
 let derT = null;
 document.addEventListener('input', e => {
   const el = e.target;
+  if (el.dataset.tz && T){ T.d[el.dataset.tz] = el.value; return; }
+  if (el.dataset.tzd && T){ T.d.docs[el.dataset.tzd] = el.checked; return; }
   if (el.dataset.wt !== undefined && W){ W.tits[+el.dataset.wt][el.dataset.k] = el.value; return; }
   const x = cur(); if (!x || S.view !== 'detail') return;
   if (el.dataset.op){ x.op[el.dataset.op] = el.value; if (el.dataset.op === 'producto'){ touch(x, true); renderDetail(true); return; } }
